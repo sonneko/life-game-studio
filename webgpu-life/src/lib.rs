@@ -12,12 +12,22 @@ pub struct WebGPULife {
     render_pipeline: wgpu::RenderPipeline,
     #[allow(dead_code)]
     cell_buffers: [wgpu::Buffer; 2],
-    #[allow(dead_code)]
     uniform_buffer: wgpu::Buffer,
+    params: SimulationParams,
     compute_bind_groups: [wgpu::BindGroup; 2],
     render_bind_groups: [wgpu::BindGroup; 2],
     grid_size: [u32; 2],
     frame_index: usize,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct SimulationParams {
+    grid_size: [u32; 2],
+    birth_rule: u32,
+    survive_rule: u32,
+    alive_color: [f32; 4],
+    dead_color: [f32; 4],
 }
 
 #[wasm_bindgen]
@@ -54,13 +64,15 @@ impl WebGPULife {
 
         let grid_size = [width, height];
         let cell_count = (width * height) as usize;
-        let mut initial_cells = vec![0u32; cell_count];
-        // Random initial state
-        for i in 0..cell_count {
-            if js_sys::Math::random() > 0.8 {
-                initial_cells[i] = 1;
-            }
-        }
+        let initial_cells = vec![0u32; cell_count];
+
+        let params = SimulationParams {
+            grid_size,
+            birth_rule: 1 << 3,
+            survive_rule: (1 << 2) | (1 << 3),
+            alive_color: [0.0, 1.0, 0.0, 1.0],
+            dead_color: [0.1, 0.1, 0.1, 1.0],
+        };
 
         let cell_buffers = [
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -77,7 +89,7 @@ impl WebGPULife {
 
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
-            contents: bytemuck::cast_slice(&grid_size),
+            contents: bytemuck::cast_slice(&[params]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -230,7 +242,7 @@ impl WebGPULife {
             }),
         ];
 
-        Ok(WebGPULife {
+        let mut life = WebGPULife {
             device,
             queue,
             surface,
@@ -239,11 +251,47 @@ impl WebGPULife {
             render_pipeline,
             cell_buffers,
             uniform_buffer,
+            params,
             compute_bind_groups,
             render_bind_groups,
             grid_size,
             frame_index: 0,
-        })
+        };
+        life.reset(0.2);
+        Ok(life)
+    }
+
+    pub fn reset(&mut self, density: f64) {
+        let cell_count = (self.grid_size[0] * self.grid_size[1]) as usize;
+        let mut initial_cells = vec![0u32; cell_count];
+        for i in 0..cell_count {
+            if js_sys::Math::random() < density {
+                initial_cells[i] = 1;
+            }
+        }
+        self.queue.write_buffer(&self.cell_buffers[0], 0, bytemuck::cast_slice(&initial_cells));
+        self.queue.write_buffer(&self.cell_buffers[1], 0, bytemuck::cast_slice(&initial_cells));
+        self.frame_index = 0;
+    }
+
+    pub fn set_cell(&mut self, x: u32, y: u32, value: u32) {
+        if x < self.grid_size[0] && y < self.grid_size[1] {
+            let idx = (y * self.grid_size[0] + x) as u64 * 4;
+            let val = [value];
+            self.queue.write_buffer(&self.cell_buffers[self.frame_index % 2], idx, bytemuck::cast_slice(&val));
+        }
+    }
+
+    pub fn update_params(&mut self, birth_rule: u32, survive_rule: u32, alive_color: Vec<f32>, dead_color: Vec<f32>) {
+        self.params.birth_rule = birth_rule;
+        self.params.survive_rule = survive_rule;
+        if alive_color.len() == 4 {
+            self.params.alive_color.copy_from_slice(&alive_color);
+        }
+        if dead_color.len() == 4 {
+            self.params.dead_color.copy_from_slice(&dead_color);
+        }
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.params]));
     }
 
     pub fn run_frame(&mut self) {
