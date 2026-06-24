@@ -322,7 +322,7 @@ impl WebGPULife {
                 timestamp_writes: None,
             });
             rpass.set_pipeline(&self.render_pipeline);
-            rpass.set_bind_group(1, &self.render_bind_groups[self.frame_index % 2], &[]);
+            rpass.set_bind_group(0, &self.render_bind_groups[self.frame_index % 2], &[]);
             rpass.draw(0..6, 0..1);
         }
 

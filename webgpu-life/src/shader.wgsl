@@ -59,8 +59,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4f
     return vec4f(pos[vertex_index], 0.0, 1.0);
 }
 
-@group(1) @binding(0) var<storage, read> cells: array<u32>;
-@group(1) @binding(1) var<uniform> render_params: SimulationParams;
+@group(0) @binding(0) var<storage, read> cells: array<u32>;
+@group(0) @binding(1) var<uniform> render_params: SimulationParams;
 
 @fragment
 fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
