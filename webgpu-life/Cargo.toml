@@ -14,3 +14,4 @@ web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Window", "GpuDevi
 pollster = "0.4"
 bytemuck = { version = "1.21", features = ["derive"] }
 wasm-bindgen-futures = "0.4"
+futures-channel = "0.3"

@@ -1,0 +1,134 @@
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let compute_bind_groups = [
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Compute Bind Group 0"),
+                layout: &compute_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: cell_buffers[0].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: cell_buffers[1].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: uniform_buffer.as_entire_binding() },
+                ],
+            }),
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Compute Bind Group 1"),
+                layout: &compute_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: cell_buffers[1].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: cell_buffers[0].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: uniform_buffer.as_entire_binding() },
+                ],
+            }),
+        ];
+
+        let render_bind_groups = [
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Render Bind Group 0"),
+                layout: &render_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: cell_buffers[1].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: uniform_buffer.as_entire_binding() },
+                ],
+            }),
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Render Bind Group 1"),
+                layout: &render_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: cell_buffers[0].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: uniform_buffer.as_entire_binding() },
+                ],
+            }),
+        ];
+
+        let mut life = WebGPULife {
+            device,
+            queue,
+            surface,
+            config,
+            compute_pipeline,
+            render_pipeline,
+            cell_buffers,
+            uniform_buffer,
+            params,
+            compute_bind_groups,
+            render_bind_groups,
+            grid_size,
+            frame_index: 0,
+        };
+        life.reset(0.2);
+        Ok(life)
+    }
+
+    pub fn reset(&mut self, density: f64) {
+        let cell_count = (self.grid_size[0] * self.grid_size[1]) as usize;
+        let mut initial_cells = vec![0u32; cell_count];
+        for i in 0..cell_count {
+            if js_sys::Math::random() < density {
+                initial_cells[i] = 1;
+            }
+        }
+        self.queue.write_buffer(&self.cell_buffers[0], 0, bytemuck::cast_slice(&initial_cells));
+        self.queue.write_buffer(&self.cell_buffers[1], 0, bytemuck::cast_slice(&initial_cells));
+        self.frame_index = 0;
+    }
+
+    pub fn set_cell(&mut self, x: u32, y: u32, value: u32) {
+        if x < self.grid_size[0] && y < self.grid_size[1] {
+            let idx = (y * self.grid_size[0] + x) as u64 * 4;
+            let val = [value];
+            self.queue.write_buffer(&self.cell_buffers[self.frame_index % 2], idx, bytemuck::cast_slice(&val));
+        }
+    }
+
+    pub fn update_params(&mut self, birth_rule: u32, survive_rule: u32, alive_color: Vec<f32>, dead_color: Vec<f32>) {
+        self.params.birth_rule = birth_rule;
+        self.params.survive_rule = survive_rule;
+        if alive_color.len() == 4 {
+            self.params.alive_color.copy_from_slice(&alive_color);
+        }
+        if dead_color.len() == 4 {
+            self.params.dead_color.copy_from_slice(&dead_color);
+        }
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.params]));
+    }
+
+    pub fn run_frame(&mut self) {
+        let output = self.surface.get_current_texture().unwrap();
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None, timestamp_writes: None });
+            cpass.set_pipeline(&self.compute_pipeline);
+            cpass.set_bind_group(0, &self.compute_bind_groups[self.frame_index % 2], &[]);
+            cpass.dispatch_workgroups((self.grid_size[0] + 15) / 16, (self.grid_size[1] + 15) / 16, 1);
+        }
+
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            rpass.set_pipeline(&self.render_pipeline);
+            rpass.set_bind_group(0, &self.render_bind_groups[self.frame_index % 2], &[]);
+            rpass.draw(0..6, 0..1);
+        }
+
+        self.queue.submit(Some(encoder.finish()));
+        output.present();
+        self.frame_index += 1;
+    }
+}

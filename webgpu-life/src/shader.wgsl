@@ -4,6 +4,9 @@ struct SimulationParams {
     survive_rule: u32,
     alive_color: vec4f,
     dead_color: vec4f,
+    view_offset: vec2f,
+    view_zoom: f32,
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input_cells: array<u32>;
@@ -64,10 +67,11 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4f
 
 @fragment
 fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-    let x = u32(pos.x);
-    let y = u32(pos.y);
+    let grid_pos = (pos.xy - render_params.view_offset) / render_params.view_zoom;
+    let x = u32(grid_pos.x);
+    let y = u32(grid_pos.y);
 
-    if (x >= render_params.grid_size.x || y >= render_params.grid_size.y) {
+    if (grid_pos.x < 0.0 || grid_pos.y < 0.0 || x >= render_params.grid_size.x || y >= render_params.grid_size.y) {
         return vec4f(0.0, 0.0, 0.0, 1.0);
     }
 
