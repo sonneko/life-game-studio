@@ -1,0 +1,33 @@
+}
+
+// Simple rendering shader
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4f {
+    var pos = array<vec2f, 6>(
+        vec2f(-1.0, -1.0), vec2f(1.0, -1.0), vec2f(-1.0, 1.0),
+        vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0)
+    );
+    return vec4f(pos[vertex_index], 0.0, 1.0);
+}
+
+@group(0) @binding(0) var<storage, read> cells: array<u32>;
+@group(0) @binding(1) var<uniform> render_params: SimulationParams;
+
+@fragment
+fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let x = u32(pos.x);
+    let y = u32(pos.y);
+
+    if (x >= render_params.grid_size.x || y >= render_params.grid_size.y) {
+        return vec4f(0.0, 0.0, 0.0, 1.0);
+    }
+
+    let idx = y * render_params.grid_size.x + x;
+    let state = cells[idx];
+
+    if (state == 1u) {
+        return render_params.alive_color;
+    } else {
+        return render_params.dead_color;
+    }
+}

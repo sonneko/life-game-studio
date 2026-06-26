@@ -28,6 +28,9 @@ struct SimulationParams {
     survive_rule: u32,
     alive_color: [f32; 4],
     dead_color: [f32; 4],
+    view_offset: [f32; 2],
+    view_zoom: f32,
+    _pad: u32,
 }
 
 #[wasm_bindgen]
@@ -72,6 +75,9 @@ impl WebGPULife {
             survive_rule: (1 << 2) | (1 << 3),
             alive_color: [0.0, 1.0, 0.0, 1.0],
             dead_color: [0.1, 0.1, 0.1, 1.0],
+            view_offset: [0.0, 0.0],
+            view_zoom: 1.0,
+            _pad: 0,
         };
 
         let cell_buffers = [
@@ -282,7 +288,36 @@ impl WebGPULife {
         }
     }
 
-    pub fn update_params(&mut self, birth_rule: u32, survive_rule: u32, alive_color: Vec<f32>, dead_color: Vec<f32>) {
+    pub fn set_cells(&mut self, x: u32, y: u32, width: u32, height: u32, values: Vec<u32>) {
+        if values.len() != (width * height) as usize { return; }
+
+        for row in 0..height {
+            let dy = y + row;
+            if dy >= self.grid_size[1] { break; }
+
+            let dx = x;
+            let row_len = width.min(self.grid_size[0] - dx);
+            let buffer_idx = (dy * self.grid_size[0] + dx) as u64 * 4;
+            let values_start = (row * width) as usize;
+            let values_end = values_start + row_len as usize;
+
+            self.queue.write_buffer(
+                &self.cell_buffers[self.frame_index % 2],
+                buffer_idx,
+                bytemuck::cast_slice(&values[values_start..values_end])
+            );
+        }
+    }
+
+    pub fn update_params(
+        &mut self,
+        birth_rule: u32,
+        survive_rule: u32,
+        alive_color: Vec<f32>,
+        dead_color: Vec<f32>,
+        view_offset: Vec<f32>,
+        view_zoom: f32,
+    ) {
         self.params.birth_rule = birth_rule;
         self.params.survive_rule = survive_rule;
         if alive_color.len() == 4 {
@@ -291,7 +326,177 @@ impl WebGPULife {
         if dead_color.len() == 4 {
             self.params.dead_color.copy_from_slice(&dead_color);
         }
+        if view_offset.len() == 2 {
+            self.params.view_offset.copy_from_slice(&view_offset);
+        }
+        self.params.view_zoom = view_zoom;
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.params]));
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.grid_size = [width, height];
+        self.params.grid_size = [width, height];
+
+        let cell_count = (width * height) as usize;
+        let initial_cells = vec![0u32; cell_count];
+
+        self.cell_buffers = [
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Cell Buffer 0"),
+                contents: bytemuck::cast_slice(&initial_cells),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            }),
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Cell Buffer 1"),
+                contents: bytemuck::cast_slice(&initial_cells),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            }),
+        ];
+
+        self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.params]));
+
+        // We need to recreate bind groups as they reference the buffers
+        let compute_bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Compute Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        self.compute_bind_groups = [
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Compute Bind Group 0"),
+                layout: &compute_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.cell_buffers[0].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.cell_buffers[1].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
+                ],
+            }),
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Compute Bind Group 1"),
+                layout: &compute_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.cell_buffers[1].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.cell_buffers[0].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buffer.as_entire_binding() },
+                ],
+            }),
+        ];
+
+        let render_bind_group_layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Render Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        self.render_bind_groups = [
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Render Bind Group 0"),
+                layout: &render_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.cell_buffers[1].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.uniform_buffer.as_entire_binding() },
+                ],
+            }),
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Render Bind Group 1"),
+                layout: &render_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.cell_buffers[0].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.uniform_buffer.as_entire_binding() },
+                ],
+            }),
+        ];
+
+        self.frame_index = 0;
+    }
+
+    pub async fn get_cells(&self) -> Result<Vec<u32>, JsValue> {
+        let size = (self.grid_size[0] * self.grid_size[1] * 4) as u64;
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Staging Buffer"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(
+            &self.cell_buffers[self.frame_index % 2],
+            0,
+            &staging_buffer,
+            0,
+            size,
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let buffer_slice = staging_buffer.slice(..);
+        let (sender, receiver) = futures_channel::oneshot::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
+            let _ = sender.send(v);
+        });
+
+        self.device.poll(wgpu::Maintain::Wait);
+
+        if let Ok(Ok(_)) = receiver.await {
+            let data = buffer_slice.get_mapped_range();
+            let result = bytemuck::cast_slice(&data).to_vec();
+            drop(data);
+            staging_buffer.unmap();
+            Ok(result)
+        } else {
+            Err(JsValue::from_str("Failed to map buffer"))
+        }
     }
 
     pub fn run_frame(&mut self) {

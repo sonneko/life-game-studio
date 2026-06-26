@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import initWebGPU, { WebGPULife } from '../../webgpu-life/pkg/webgpu_life';
+import { encodeRLE, decodeRLE } from './utils/rle';
 import './App.css';
 
-const GRID_SIZE = 512;
-
 function App() {
+  const [gridSize, setGridSize] = useState(512);
   const [mode, setMode] = useState<'WebGPU' | 'HashLife'>('WebGPU');
   const [running, setRunning] = useState(true);
   const [density, setDensity] = useState(0.2);
@@ -14,6 +14,8 @@ function App() {
   const [aliveColor, setAliveColor] = useState('#00ff00');
   const [deadColor, setDeadColor] = useState('#1a1a1a');
   const [stats, setStats] = useState({ fps: 0, generation: 0 });
+  const [zoom, setZoom] = useState(1.0);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
   const generationRef = useRef<number>(0);
   const [hashLifeStats, setHashLifeStats] = useState<{gen: string, pop: string, time: number} | null>(null);
 
@@ -38,12 +40,21 @@ function App() {
     if (mode === 'WebGPU' && canvasRef.current && !webgpuLifeRef.current) {
       const init = async () => {
         await initWebGPU();
-        const life = await WebGPULife.new(canvasRef.current!, GRID_SIZE, GRID_SIZE);
+        const life = await WebGPULife.new(canvasRef.current!, gridSize, gridSize);
         webgpuLifeRef.current = life;
       };
       init();
     }
   }, [mode]);
+
+  // Handle Resize
+  useEffect(() => {
+    if (webgpuLifeRef.current) {
+      webgpuLifeRef.current.resize(gridSize, gridSize);
+      generationRef.current = 0;
+      setStats(prev => ({ ...prev, generation: 0 }));
+    }
+  }, [gridSize]);
 
   // WebGPU Loop
   useEffect(() => {
@@ -77,10 +88,12 @@ function App() {
         birthRule,
         surviveRule,
         new Float32Array(hexToRgb(aliveColor)),
-        new Float32Array(hexToRgb(deadColor))
+        new Float32Array(hexToRgb(deadColor)),
+        new Float32Array([offset.x, offset.y]),
+        zoom
       );
     }
-  }, [birthRule, surviveRule, aliveColor, deadColor]);
+  }, [birthRule, surviveRule, aliveColor, deadColor, offset, zoom]);
 
   // HashLife Worker Init
   useEffect(() => {
@@ -105,25 +118,41 @@ function App() {
     else setSurviveRule(prev => prev ^ (1 << bit));
   };
 
+  const [drawMode, setDrawMode] = useState<'Pen' | 'Eraser'>('Pen');
+
   const handleCanvasInteraction = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current || !webgpuLifeRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
-    const x = Math.floor(((e.clientX - rect.left) / rect.width) * GRID_SIZE);
-    const y = Math.floor(((e.clientY - rect.top) / rect.height) * GRID_SIZE);
+    const x = Math.floor((e.clientX - rect.left - offset.x) / zoom);
+    const y = Math.floor((e.clientY - rect.top - offset.y) / zoom);
 
-    // Draw a small 3x3 block on click/drag
-    for (let i = -1; i <= 1; i++) {
-      for (let j = -1; j <= 1; j++) {
-        const nx = x + i;
-        const ny = y + j;
-        if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) {
-          webgpuLifeRef.current.set_cell(nx, ny, 1);
-        }
-      }
+    if (x >= 0 && x < gridSize && y >= 0 && y < gridSize) {
+      webgpuLifeRef.current.set_cell(x, y, drawMode === 'Pen' ? 1 : 0);
     }
-  }, []);
-
+  }, [offset, zoom, gridSize, drawMode]);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const lastMousePos = useRef({ x: 0, y: 0 });
+
+  const handleWheel = (e: React.WheelEvent) => {
+    const delta = -e.deltaY;
+    const factor = 1.1;
+    const newZoom = delta > 0 ? zoom * factor : zoom / factor;
+
+    // Zoom towards mouse position
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (rect) {
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      const dx = (mouseX - offset.x) / zoom;
+      const dy = (mouseY - offset.y) / zoom;
+      const newOffsetX = mouseX - dx * newZoom;
+      const newOffsetY = mouseY - dy * newZoom;
+
+      setZoom(Math.max(0.1, Math.min(100, newZoom)));
+      setOffset({ x: newOffsetX, y: newOffsetY });
+    }
+  };
   const [rleInput, setRleInput] = useState('x = 3, y = 3, rule = B3/S23\nbo$2bo$3o!');
 
   const handleReset = () => {
@@ -140,7 +169,7 @@ function App() {
       setSurviveRule((1 << 2) | (1 << 3));
       if (webgpuLifeRef.current) {
         webgpuLifeRef.current.reset(0);
-        const mid = Math.floor(GRID_SIZE / 2);
+        const mid = Math.floor(gridSize / 2);
         webgpuLifeRef.current.set_cell(mid, mid - 1, 1);
         webgpuLifeRef.current.set_cell(mid + 1, mid, 1);
         webgpuLifeRef.current.set_cell(mid - 1, mid + 1, 1);
@@ -160,6 +189,27 @@ function App() {
   const loadRleToHashLife = () => {
     if (workerRef.current) {
       workerRef.current.postMessage({ type: 'init', rle: rleInput });
+    }
+  };
+
+  const loadRleToWebGPU = () => {
+    if (webgpuLifeRef.current) {
+      const { cells, width, height } = decodeRLE(rleInput);
+      // If dimensions changed, we might need to resize
+      if (width > gridSize || height > gridSize) {
+        setGridSize(Math.max(width, height));
+      }
+
+      webgpuLifeRef.current.reset(0);
+      webgpuLifeRef.current.set_cells(0, 0, width, height, cells);
+    }
+  };
+
+  const exportFromWebGPU = async () => {
+    if (webgpuLifeRef.current) {
+      const cells = await webgpuLifeRef.current.get_cells();
+      const rle = encodeRLE(cells, gridSize, gridSize);
+      setRleInput(rle);
     }
   };
 
@@ -197,6 +247,10 @@ function App() {
 
         <section className="control-group">
           <h3>Simulation</h3>
+          <div className="button-row">
+            <button className={drawMode === 'Pen' ? 'active' : 'secondary'} onClick={() => setDrawMode('Pen')}>Pen</button>
+            <button className={drawMode === 'Eraser' ? 'active' : 'secondary'} onClick={() => setDrawMode('Eraser')}>Eraser</button>
+          </div>
           <div className="button-row">
             <button onClick={() => setRunning(!running)}>{running ? 'Pause' : 'Resume'}</button>
             <button className="secondary" onClick={() => webgpuLifeRef.current?.run_frame()}>Step</button>
@@ -244,61 +298,93 @@ function App() {
           </div>
         </section>
 
+        <section className="control-group">
+          <div className="label-row">
+            <span>Grid Size</span>
+            <span>{gridSize}x{gridSize}</span>
+          </div>
+          <input type="range" min="64" max="2048" step="64" value={gridSize} onChange={e => setGridSize(parseInt(e.target.value))} />
+        </section>
+
         {mode === 'WebGPU' && (
           <div className="stats-panel">
             <div>FPS: {stats.fps}</div>
             <div>Generation: {stats.generation}</div>
-            <div>Resolution: {GRID_SIZE}x{GRID_SIZE}</div>
+            <div>Resolution: {gridSize}x{gridSize}</div>
+            <div>Zoom: {zoom.toFixed(2)}x</div>
           </div>
         )}
       </aside>
 
       <main className="main-content">
-        {mode === 'WebGPU' ? (
-          <div className="canvas-container">
-            <canvas
-              ref={canvasRef}
-              width={GRID_SIZE}
-              height={GRID_SIZE}
-              onMouseDown={(e) => { setIsDrawing(true); handleCanvasInteraction(e); }}
-              onMouseUp={() => setIsDrawing(false)}
-              onMouseLeave={() => setIsDrawing(false)}
-              onMouseMove={(e) => { if (isDrawing) handleCanvasInteraction(e); }}
+        <div
+          className="canvas-container"
+          style={{ display: mode === 'WebGPU' ? 'block' : 'none', width: '800px', height: '800px', overflow: 'hidden', background: '#000' }}
+          onWheel={handleWheel}
+        >
+          <canvas
+            ref={canvasRef}
+            width={800}
+            height={800}
+            onMouseDown={(e) => {
+              if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+                setIsPanning(true);
+              } else {
+                setIsDrawing(true);
+                handleCanvasInteraction(e);
+              }
+              lastMousePos.current = { x: e.clientX, y: e.clientY };
+            }}
+            onMouseUp={() => { setIsDrawing(false); setIsPanning(false); }}
+            onMouseLeave={() => { setIsDrawing(false); setIsPanning(false); }}
+            onMouseMove={(e) => {
+              if (isPanning) {
+                const dx = e.clientX - lastMousePos.current.x;
+                const dy = e.clientY - lastMousePos.current.y;
+                setOffset(prev => ({ x: prev.x + dx, y: prev.y + dy }));
+              } else if (isDrawing) {
+                handleCanvasInteraction(e);
+              }
+              lastMousePos.current = { x: e.clientX, y: e.clientY };
+            }}
+            onContextMenu={(e) => e.preventDefault()}
+          />
+        </div>
+        <div style={{ maxWidth: '600px', width: '100%', display: mode === 'HashLife' ? 'block' : 'none' }}>
+          <h3>HashLife Long-term Computation</h3>
+          <p>Skip massive numbers of generations instantly using the HashLife algorithm.</p>
+
+          <section className="control-group" style={{ marginBottom: '20px' }}>
+              <label>RLE Pattern Input / Export</label>
+            <textarea
+              value={rleInput}
+              onChange={e => setRleInput(e.target.value)}
+              style={{ width: '100%', height: '120px', backgroundColor: '#333', color: 'white', border: '1px solid #444', borderRadius: '4px', padding: '8px', fontFamily: 'monospace' }}
             />
-          </div>
-        ) : (
-          <div style={{maxWidth: '600px', width: '100%'}}>
-            <h3>HashLife Long-term Computation</h3>
-            <p>Skip massive numbers of generations instantly using the HashLife algorithm.</p>
-
-            <section className="control-group" style={{marginBottom: '20px'}}>
-              <label>RLE Pattern Input</label>
-              <textarea
-                value={rleInput}
-                onChange={e => setRleInput(e.target.value)}
-                style={{width: '100%', height: '120px', backgroundColor: '#333', color: 'white', border: '1px solid #444', borderRadius: '4px', padding: '8px', fontFamily: 'monospace'}}
-              />
-              <button onClick={loadRleToHashLife} disabled={!workerReady} style={{marginTop: '8px'}}>Load Pattern</button>
-            </section>
-
-            <div className="control-group">
-              <div className="label-row">
-                <span>Step: 2^{exponent}</span>
-                <span>{Math.pow(2, exponent).toLocaleString()} gen</span>
+              <div className="button-row">
+                <button onClick={loadRleToHashLife} disabled={!workerReady}>Load to HashLife</button>
+                <button onClick={loadRleToWebGPU}>Load to WebGPU</button>
               </div>
-              <input type="range" min="0" max="64" value={exponent} onChange={e => setExponent(parseInt(e.target.value))} />
-              <button onClick={handleJump} disabled={!workerReady} style={{marginTop: '10px'}}>Jump!</button>
+              <button className="secondary" onClick={exportFromWebGPU} style={{ marginTop: '8px' }}>Export from WebGPU</button>
+          </section>
+
+          <div className="control-group">
+            <div className="label-row">
+              <span>Step: 2^{exponent}</span>
+              <span>{Math.pow(2, exponent).toLocaleString()} gen</span>
             </div>
-
-            {hashLifeStats && (
-              <div className="stats-panel" style={{marginTop: '20px'}}>
-                <div>Gen: {hashLifeStats.gen}</div>
-                <div>Pop: {hashLifeStats.pop}</div>
-                <div>Time: {hashLifeStats.time.toFixed(2)} ms</div>
-              </div>
-            )}
+            <input type="range" min="0" max="64" value={exponent} onChange={e => setExponent(parseInt(e.target.value))} />
+            <button onClick={handleJump} disabled={!workerReady} style={{ marginTop: '10px' }}>Jump!</button>
           </div>
-        )}
+
+          {hashLifeStats && (
+            <div className="stats-panel" style={{ marginTop: '20px' }}>
+              <div>Gen: {hashLifeStats.gen}</div>
+              <div>Pop: {hashLifeStats.pop}</div>
+              <div>Time: {hashLifeStats.time.toFixed(2)} ms</div>
+            </div>
+          )}
+        </div>
       </main>
     </div>
   );

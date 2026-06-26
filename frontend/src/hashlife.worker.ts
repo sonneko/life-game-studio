@@ -6,13 +6,18 @@ self.onmessage = async (e) => {
     const { type, exponent, rle } = e.data;
 
     if (type === "init") {
-        await init();
-        if (rle) {
-            hashlife = HashLife.from_rle(rle);
-        } else {
-            hashlife = new HashLife();
+        try {
+            await init();
+            if (rle) {
+                hashlife = HashLife.from_rle(rle);
+            } else {
+                hashlife = new HashLife();
+            }
+            self.postMessage({ type: "ready" });
+        } catch (e) {
+            console.error("HashLife init error:", e);
+            self.postMessage({ type: "error", message: String(e) });
         }
-        self.postMessage({ type: "ready" });
     } else if (type === "step") {
         if (!hashlife) return;
         const start = performance.now();
